@@ -1,0 +1,502 @@
+TASK 
+1.1
+
+package main
+
+import (
+    "crypto/aes"
+    "crypto/cipher"
+    "crypto/rand"
+    "crypto/sha256"
+    "encoding/hex"
+    "flag"
+    "fmt"
+    "io"
+    "io/ioutil"
+    "log"
+    "os"
+    "path/filepath"
+    "strings"
+    "time"
+)
+
+var (
+    sourceDir   string
+    backupDir   string
+    encrypt     bool
+    encryptKey  string
+    recursive   bool
+    logFilePath string
+)
+
+func init() {
+    flag.StringVar(&sourceDir, "source", "", "Source directory to be backed up")
+    flag.StringVar(&backupDir, "backup", "", "Backup directory")
+    flag.BoolVar(&encrypt, "encrypt", false, "Encrypt backup files")
+    flag.StringVar(&encryptKey, "key", "", "Encryption key (required if encrypt flag is true)")
+    flag.BoolVar(&recursive, "recursive", false, "Recursively backup subdirectories")
+    flag.StringVar(&logFilePath, "log", "", "Log file path")
+    flag.Parse()
+
+    if sourceDir == "" || backupDir == "" {
+        fmt.Println("Both source and backup directories are required.")
+        flag.PrintDefaults()
+        os.Exit(1)
+    }
+
+    if encrypt && encryptKey == "" {
+        fmt.Println("Encryption key is required when encrypt flag is true.")
+        flag.PrintDefaults()
+        os.Exit(1)
+    }
+
+    if logFilePath == "" {
+        logFilePath = filepath.Join(backupDir, "backup.log")
+    }
+}
+
+func main() {
+    // Create backup directory if it doesn't exist
+    if err := os.MkdirAll(backupDir, 0755); err != nil {
+        log.Fatalf("Error creating backup directory: %v", err)
+    }
+
+    // Initialize logging
+    logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        log.Fatalf("Error opening log file: %v", err)
+    }
+    defer logFile.Close()
+    log.SetOutput(logFile)
+
+    log.Printf("Starting backup at %s\n", time.Now().Format(time.RFC3339))
+
+    if err := backup(sourceDir, backupDir); err != nil {
+        log.Fatalf("Backup failed: %v", err)
+    }
+
+    log.Printf("Backup completed at %s\n", time.Now().Format(time.RFC3339))
+}
+
+func backup(src, dst string) error {
+    var backupCount int
+    var err error
+
+    // Walk through source directory
+    err = filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+
+        // Skip the source directory itself
+        if path == src {
+            return nil
+        }
+
+        // Get relative path to file
+        relPath, err := filepath.Rel(src, path)
+        if err != nil {
+            return err
+        }
+
+        // Generate destination path
+        destPath := filepath.Join(dst, relPath)
+
+        // Check if file is a directory
+        if info.IsDir() {
+            // If recursive flag is set, create directory in backup
+            if recursive {
+                if err := os.MkdirAll(destPath, info.Mode()); err != nil {
+                    return err
+                }
+            }
+        } else {
+            // Check if file has been modified
+            if hasChanged(path, destPath) {
+                // Copy the file
+                if err := copyFile(path, destPath); err != nil {
+                    return err
+                }
+                backupCount++
+            }
+        }
+
+        return nil
+    })
+
+    if err != nil {
+        return err
+    }
+
+    log.Printf("Backup completed. %d files backed up.\n", backupCount)
+    return nil
+}
+
+func hasChanged(src, dst string) bool {
+    // If destination file doesn't exist, consider it changed
+    if _, err := os.Stat(dst); os.IsNotExist(err) {
+        return true
+    }
+
+    // Calculate SHA256 checksum of source and destination files
+    srcHash, _ := hashFile(src)
+    dstHash, _ := hashFile(dst)
+
+    // Compare checksums
+    return srcHash != dstHash
+}
+
+func hashFile(path string) (string, error) {
+    file, err := os.Open(path)
+    if err != nil {
+        return "", err
+    }
+    defer file.Close()
+
+    hasher := sha256.New()
+    if _, err := io.Copy(hasher, file); err != nil {
+        return "", err
+    }
+
+    return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func copyFile(src, dst string) error {
+    in, err := os.Open(src)
+    if err != nil {
+        return err
+    }
+    defer in.Close()
+
+    out, err := os.Create(dst)
+    if err != nil {
+        return err
+    }
+    defer out.Close()
+
+    _, err = io.Copy(out, in)
+    return err
+}
+
+
+1.2
+package main
+
+import (
+	"archive/zip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+var (
+	sourceDir   string
+	backupDir   string
+	encrypt     bool
+	encryptKey  string
+	recursive   bool
+	logFilePath string
+	share       bool
+	filesToSend []string
+)
+
+func init() {
+	flag.StringVar(&sourceDir, "source", "", "Source directory to be backed up")
+	flag.StringVar(&backupDir, "backup", "", "Backup directory")
+	flag.BoolVar(&encrypt, "encrypt", false, "Encrypt backup files")
+	flag.StringVar(&encryptKey, "key", "", "Encryption key (required if encrypt flag is true)")
+	flag.BoolVar(&recursive, "recursive", false, "Recursively backup subdirectories")
+	flag.StringVar(&logFilePath, "log", "", "Log file path")
+	flag.BoolVar(&share, "share", false, "Share backed-up directory through data transfer protocol")
+	flag.StringSliceVar(&filesToSend, "files", nil, "Specify files to send")
+
+	flag.Parse()
+
+	if sourceDir == "" || backupDir == "" {
+		fmt.Println("Both source and backup directories are required.")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	if encrypt && encryptKey == "" {
+		fmt.Println("Encryption key is required when encrypt flag is true.")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	if logFilePath == "" {
+		logFilePath = filepath.Join(backupDir, "backup.log")
+	}
+}
+
+func main() {
+	if share {
+		if err := shareBackup(backupDir, filesToSend); err != nil {
+			log.Fatalf("Error sharing backup: %v", err)
+		}
+		return
+	}
+
+	// Create backup directory if it doesn't exist
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		log.Fatalf("Error creating backup directory: %v", err)
+	}
+
+	// Initialize logging
+	logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Error opening log file: %v", err)
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
+
+	log.Printf("Starting backup at %s\n", time.Now().Format(time.RFC3339))
+
+	if err := backup(sourceDir, backupDir); err != nil {
+		log.Fatalf("Backup failed: %v", err)
+	}
+
+	log.Printf("Backup completed at %s\n", time.Now().Format(time.RFC3339))
+}
+
+func backup(src, dst string) error {
+	var backupCount int
+	var err error
+
+	// Walk through source directory
+	err = filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip the source directory itself
+		if path == src {
+			return nil
+		}
+
+		// Get relative path to file
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		// Generate destination path
+		destPath := filepath.Join(dst, relPath)
+
+		// Check if file is a directory
+		if info.IsDir() {
+			// If recursive flag is set, create directory in backup
+			if recursive {
+				if err := os.MkdirAll(destPath, info.Mode()); err != nil {
+					return err
+				}
+			}
+		} else {
+			// Check if file has been modified
+			if hasChanged(path, destPath) {
+				// Copy the file
+				if err := copyFile(path, destPath); err != nil {
+					return err
+				}
+				backupCount++
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Backup completed. %d files backed up.\n", backupCount)
+	return nil
+}
+
+func hasChanged(src, dst string) bool {
+	// If destination file doesn't exist, consider it changed
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return true
+	}
+
+	// Calculate SHA256 checksum of source and destination files
+	srcHash, _ := hashFile(src)
+	dstHash, _ := hashFile(dst)
+
+	// Compare checksums
+	return srcHash != dstHash
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func shareBackup(backupDir string, filesToSend []string) error {
+	// Create a ZIP archive of the specified files
+	zipFilePath := "backup.zip"
+	zipFile, err := os.Create(zipFilePath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	for _, file := range filesToSend {
+		err := addFileToZip(zipWriter, backupDir, file)
+		if err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("Backup shared successfully as %s\n", zipFilePath)
+	return nil
+}
+
+func addFileToZip(zipWriter *zip.Writer, basePath, filePath string) error {
+	fullPath := filepath.Join(basePath, filePath)
+
+	fileInfo, err := os.Stat(fullPath)
+	if err != nil {
+		return err
+	}
+
+	header, err := zip.FileInfoHeader(fileInfo)
+	if err != nil {
+		return err
+	}
+
+	header.Name = filePath
+
+	if fileInfo.IsDir() {
+		header.Name += "/"
+	} else {
+		header.Method = zip.Deflate
+	}
+
+	writer, err := zipWriter.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+
+	if !fileInfo.IsDir() {
+		file, err := os.Open(fullPath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+
+
+1.3
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+)
+
+// Config represents the configuration parameters
+type Config struct {
+	BackupDirectory  string `json:"backup_directory"`
+	LoggerFileFormat string `json:"logger_file_format"`
+}
+
+var (
+	configPath string
+	config     Config
+)
+
+func init() {
+	flag.StringVar(&configPath, "config", "", "Path to configuration file")
+	flag.Parse()
+
+	if configPath == "" {
+		fmt.Println("Configuration file path is required.")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	// Parse the configuration file
+	err := parseConfig(configPath, &config)
+	if err != nil {
+		log.Fatalf("Error parsing configuration file: %v", err)
+	}
+}
+
+func main() {
+	// Access configuration parameters
+	fmt.Printf("Backup directory: %s\n", config.BackupDirectory)
+	fmt.Printf("Logger file format: %s\n", config.LoggerFileFormat)
+}
+
+func parseConfig(filePath string, cfg *Config) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	err = decoder.Decode(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Validate configuration parameters if needed
+
+	return nil
+}
